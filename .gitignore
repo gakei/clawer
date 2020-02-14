@@ -4,10 +4,10 @@ build/
 out/
 target/
 *.iml
+*.db
 
 # Eclipse
 .classpath
 .project
 .settings/
 bin/
-

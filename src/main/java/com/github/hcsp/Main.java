@@ -14,26 +14,33 @@ import org.jsoup.nodes.Element;
 import java.io.IOException;
 import java.sql.*;
 import java.util.ArrayList;
-import java.util.List;
+import java.util.stream.Collectors;
 
 public class Main {
     private static final String USER_NAME = "root";
     private static final String PASSWORD = "root";
 
-    private static List<String> loadUrlsFromDataBase(Connection connection, String sql) throws SQLException {
-        List<String> results = new ArrayList<>();
+    private static String getNextLink(Connection connection, String sql) throws SQLException {
         ResultSet resultSet = null;
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             resultSet = statement.executeQuery();
             while (resultSet.next()) {
-                results.add(resultSet.getString(1));
+                return resultSet.getString(1);
             }
         } finally {
             if (resultSet != null) {
                 resultSet.close();
             }
         }
-        return results;
+        return null;
+    }
+
+    private static String getNextLinkThenDelete(Connection connection) throws SQLException {
+        String link = getNextLink(connection, "select link from LINKS_TO_BE_PROCESSED LIMIT 1");
+        if (link != null) {
+            updateDatabase(connection, link, "DELETE FROM LINKS_TO_BE_PROCESSED where link = ?");
+        }
+        return link;
     }
 
 
@@ -41,23 +48,16 @@ public class Main {
     public static void main(String[] args) throws IOException, SQLException {
         Connection connection = DriverManager.getConnection("jdbc:h2:file:C:/Users/WHJ/Desktop/clawer/news", USER_NAME, PASSWORD);
 
-        while (true) {
-            List<String> linkPool = loadUrlsFromDataBase(connection, "select link from LINKS_TO_BE_PROCESSED");
+        String link;
 
-            if (linkPool.isEmpty()) {
-                break;
-            }
-
-            // 从待处理池子中捞一个来处理，
-            // 处理完后从池子（包括数据库）中删除
-            String link = linkPool.remove(linkPool.size() - 1);
-            insertLinkIntoDatabase(connection, link, "DELETE FROM LINKS_TO_BE_PROCESSED where link = ?");
-
+        while ((link = getNextLinkThenDelete(connection)) != null) {
             if (isLinkProcessed(connection, link)) {
                 continue;
             }
 
             if (isInteresting(link)) {
+                System.out.println(link);
+
                 Document doc = httpGetAndParseHtml(link);
 
                 if (doc == null) {
@@ -66,9 +66,9 @@ public class Main {
 
                 parseUrlsFromPageAndStoreIntoDatabase(connection, doc);
 
-                storeIntoDatabaseIfItIsNewsPage(doc);
+                storeIntoDatabaseIfItIsNewsPage(connection, doc, link);
 
-                insertLinkIntoDatabase(connection, link, "INSERT INTO LINKS_ALREADY_PROCESSED (link) values (?)");
+                updateDatabase(connection, link, "INSERT INTO LINKS_ALREADY_PROCESSED (link) values (?)");
             }
         }
     }
@@ -76,7 +76,14 @@ public class Main {
     private static void parseUrlsFromPageAndStoreIntoDatabase(Connection connection, Document doc) throws SQLException {
         for (Element aTag : doc.select("a")) {
             String href = aTag.attr("href");
-            insertLinkIntoDatabase(connection, href, "INSERT INTO LINKS_TO_BE_PROCESSED(link) values (?)");
+
+            if (href.startsWith("//")) {
+                href = "https" + href;
+            }
+
+            if (!href.toLowerCase().startsWith("javascript")) {
+                updateDatabase(connection, href, "INSERT INTO LINKS_TO_BE_PROCESSED(link) values (?)");
+            }
         }
     }
 
@@ -96,30 +103,32 @@ public class Main {
         return false;
     }
 
-    private static void insertLinkIntoDatabase(Connection connection, String link, String sql) throws SQLException {
+    private static void updateDatabase(Connection connection, String link, String sql) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, link);
             statement.executeUpdate();
         }
     }
 
-    private static void storeIntoDatabaseIfItIsNewsPage(Document doc) {
+    private static void storeIntoDatabaseIfItIsNewsPage(Connection connection, Document doc, String link) throws SQLException {
         ArrayList<Element> articleTags = doc.select("article");
         if (!articleTags.isEmpty()) {
-            for (Element article : articleTags) {
+            for (Element articleTag : articleTags) {
                 String title = articleTags.get(0).child(0).text();
-                System.out.println(title);
+                String content = articleTag.select("p").stream().map(Element::text).collect(Collectors.joining("\n"));
+
+                try (PreparedStatement statement = connection.prepareStatement("insert into NEWS (url, title, CONTENT, created_at, modified_at)Values(?,?,?,now(),now())")) {
+                    statement.setString(1, link);
+                    statement.setString(2, title);
+                    statement.setString(3, content);
+                    statement.executeUpdate();
+                }
             }
         }
     }
 
     private static Document httpGetAndParseHtml(String link) throws IOException {
         CloseableHttpClient httpclient = HttpClients.createDefault();
-
-        if (link.startsWith("//")) {
-            link = "https" + link;
-            System.out.println(link);
-        }
 
         System.out.println(link);
         HttpGet httpGet = null;
@@ -133,7 +142,6 @@ public class Main {
         httpGet.addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36");
 
         try (CloseableHttpResponse response1 = httpclient.execute(httpGet)) {
-            System.out.println(response1.getStatusLine());
             HttpEntity entity1 = response1.getEntity();
 
             String html = EntityUtils.toString(entity1);
