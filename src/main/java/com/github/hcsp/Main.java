@@ -1,5 +1,6 @@
 package com.github.hcsp;
 
+import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import org.apache.http.HttpEntity;
 import org.apache.http.client.methods.CloseableHttpResponse;
 import org.apache.http.client.methods.HttpGet;
@@ -9,42 +10,96 @@ import org.apache.http.util.EntityUtils;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
+
 import java.io.IOException;
+import java.sql.*;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 public class Main {
-    public static void main(String[] args) throws IOException {
-        //待处理的链接池
-        List<String> linkPool = new ArrayList<>();
-        //已经处理的链接池
-        Set<String> processedLinks = new HashSet<>();
-        linkPool.add("https://sina.cn");
+    private static final String USER_NAME = "root";
+    private static final String PASSWORD = "root";
+
+    private static List<String> loadUrlsFromDataBase(Connection connection, String sql) throws SQLException {
+        List<String> results = new ArrayList<>();
+        ResultSet resultSet = null;
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            resultSet = statement.executeQuery();
+            while (resultSet.next()) {
+                results.add(resultSet.getString(1));
+            }
+        } finally {
+            if (resultSet != null) {
+                resultSet.close();
+            }
+        }
+        return results;
+    }
+
+
+    @SuppressFBWarnings("DMI_CONSTANT_DB_PASSWORD")
+    public static void main(String[] args) throws IOException, SQLException {
+        Connection connection = DriverManager.getConnection("jdbc:h2:file:C:/Users/WHJ/Desktop/clawer/news", USER_NAME, PASSWORD);
 
         while (true) {
+            List<String> linkPool = loadUrlsFromDataBase(connection, "select link from LINKS_TO_BE_PROCESSED");
+
             if (linkPool.isEmpty()) {
                 break;
             }
 
+            // 从待处理池子中捞一个来处理，
+            // 处理完后从池子（包括数据库）中删除
             String link = linkPool.remove(linkPool.size() - 1);
+            insertLinkIntoDatabase(connection, link, "DELETE FROM LINKS_TO_BE_PROCESSED where link = ?");
 
-            if (processedLinks.contains(link)) {
+            if (isLinkProcessed(connection, link)) {
                 continue;
             }
 
-            //排除登陆页面
             if (isInteresting(link)) {
                 Document doc = httpGetAndParseHtml(link);
-                doc.select("a").stream().map(aTag -> aTag.attr("href")).forEach(linkPool::add);
-                //假如这是一个新闻的详情页面，就存入数据库，否则，就什么都不做
-                storeIntoDatabaseIfItIsNewsPage(doc);
-                processedLinks.add(link);
 
-            } else {
-                //不感兴趣的链接不处理它
+                if (doc == null) {
+                    continue;
+                }
+
+                parseUrlsFromPageAndStoreIntoDatabase(connection, doc);
+
+                storeIntoDatabaseIfItIsNewsPage(doc);
+
+                insertLinkIntoDatabase(connection, link, "INSERT INTO LINKS_ALREADY_PROCESSED (link) values (?)");
             }
+        }
+    }
+
+    private static void parseUrlsFromPageAndStoreIntoDatabase(Connection connection, Document doc) throws SQLException {
+        for (Element aTag : doc.select("a")) {
+            String href = aTag.attr("href");
+            insertLinkIntoDatabase(connection, href, "INSERT INTO LINKS_TO_BE_PROCESSED(link) values (?)");
+        }
+    }
+
+    private static boolean isLinkProcessed(Connection connection, String link) throws SQLException {
+        ResultSet resultSet = null;
+        try (PreparedStatement statement = connection.prepareStatement("SELECT LINK from LINKS_ALREADY_PROCESSED where LINK = ?")) {
+            statement.setString(1, link);
+            resultSet = statement.executeQuery();
+            while (resultSet.next()) {
+                return true;
+            }
+        } finally {
+            if (resultSet != null) {
+                resultSet.close();
+            }
+        }
+        return false;
+    }
+
+    private static void insertLinkIntoDatabase(Connection connection, String link, String sql) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, link);
+            statement.executeUpdate();
         }
     }
 
@@ -67,7 +122,14 @@ public class Main {
         }
 
         System.out.println(link);
-        HttpGet httpGet = new HttpGet(link);
+        HttpGet httpGet = null;
+        try {
+            httpGet = new HttpGet(link);
+        } catch (IllegalArgumentException e) {
+            e.printStackTrace();
+            return null;
+        }
+
         httpGet.addHeader("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/76.0.3809.100 Safari/537.36");
 
         try (CloseableHttpResponse response1 = httpclient.execute(httpGet)) {
@@ -79,6 +141,7 @@ public class Main {
         }
     }
 
+    //排除登陆页面
     private static boolean isInteresting(String link) {
         return (isNewsPage(link) || isIndexPage(link) && isNotLoginPage(link));
     }
