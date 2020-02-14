@@ -9,8 +9,6 @@ import org.apache.http.util.EntityUtils;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
-import org.jsoup.select.Elements;
-
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -26,13 +24,15 @@ public class Main {
         linkPool.add("https://sina.cn");
 
         while (true) {
-            if (linkPool.isEmpty())
+            if (linkPool.isEmpty()) {
                 break;
+            }
 
             String link = linkPool.remove(linkPool.size() - 1);
 
-            if (processedLinks.contains(link))
+            if (processedLinks.contains(link)) {
                 continue;
+            }
 
             //排除登陆页面
             if (isInteresting(link)) {
